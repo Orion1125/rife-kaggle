@@ -219,6 +219,7 @@ def _cmd_interp(args: InterpArgs) -> int:
 
     console.log("[1/4] uploading video as Kaggle dataset...")
     kg.push_dataset(dir_path=dataset_dir, creds=creds, version_notes=f"rife-kaggle {run_slug}")
+    kg.wait_for_dataset(dataset_id=dataset_id, creds=creds)
 
     console.log("[2/4] pushing notebook...")
     kg.push_kernel(dir_path=kernel_dir, creds=creds)

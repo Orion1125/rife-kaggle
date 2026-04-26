@@ -198,6 +198,49 @@ def push_dataset(*, dir_path: Path, creds: Credentials, version_notes: str | Non
     )
 
 
+def dataset_status(*, dataset_id: str, creds: Credentials) -> str:
+    """Best-effort dataset status: ``ready``, ``processing``, ``error``, or raw stdout."""
+    try:
+        proc = _run(["datasets", "status", dataset_id], creds, capture=True)
+    except subprocess.CalledProcessError:
+        return "unknown"
+    text = (proc.stdout or "").strip().lower()
+    for token in ("ready", "error", "processing", "queued"):
+        if token in text:
+            return token
+    return text or "unknown"
+
+
+def wait_for_dataset(
+    *,
+    dataset_id: str,
+    creds: Credentials,
+    poll_seconds: int = 5,
+    timeout_seconds: int = 300,
+) -> str:
+    """Block until a dataset reports ``ready`` (or a terminal failure).
+
+    Necessary because ``kernels push`` doesn't validate that the referenced
+    dataset has finished processing — and a kernel pushed against a not-yet-
+    ready dataset starts up without ``/kaggle/input/<slug>/`` populated.
+    """
+    deadline = time.time() + timeout_seconds
+    last = ""
+    while time.time() < deadline:
+        status = dataset_status(dataset_id=dataset_id, creds=creds)
+        if status != last:
+            console.log(f"[kaggle] dataset {dataset_id} -> {status}")
+            last = status
+        if status == "ready":
+            return status
+        if status == "error":
+            raise KaggleError(f"Dataset {dataset_id} failed processing")
+        time.sleep(poll_seconds)
+    raise KaggleError(
+        f"Timed out after {timeout_seconds}s waiting for dataset {dataset_id} to be ready."
+    )
+
+
 def push_kernel(*, dir_path: Path, creds: Credentials) -> None:
     _run(["kernels", "push", "-p", str(dir_path)], creds)
 
