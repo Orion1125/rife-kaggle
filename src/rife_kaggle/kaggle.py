@@ -27,37 +27,109 @@ class KaggleError(RuntimeError):
 
 @dataclass(frozen=True)
 class Credentials:
+    """Resolved Kaggle credentials.
+
+    Kaggle has two auth shapes:
+      - LEGACY_API_KEY: a 32-hex API key stored in ``~/.kaggle/kaggle.json``,
+        sent as HTTP Basic auth alongside the username.
+      - ACCESS_TOKEN:   a ``KGAT_``-prefixed bearer token stored in
+        ``~/.kaggle/access_token`` (or ``KAGGLE_API_TOKEN`` env), sent as
+        HTTP Bearer. Newer Kaggle endpoints (BlobApiService, kernels list)
+        only accept this form.
+
+    All Kaggle ids are lowercase; the username is normalised here so callers
+    can use it directly when building dataset/kernel slugs.
+    """
+
     username: str
-    key: str
+    secret: str
+    is_access_token: bool
 
     def to_env(self) -> dict[str, str]:
-        return {"KAGGLE_USERNAME": self.username, "KAGGLE_KEY": self.key}
+        if self.is_access_token:
+            return {"KAGGLE_USERNAME": self.username, "KAGGLE_API_TOKEN": self.secret}
+        return {"KAGGLE_USERNAME": self.username, "KAGGLE_KEY": self.secret}
 
 
 def resolve_credentials() -> Credentials:
-    """Pull credentials from env, falling back to ``~/.kaggle/kaggle.json``."""
-    username = os.environ.get("KAGGLE_USERNAME")
-    key = os.environ.get("KAGGLE_KEY")
-    if username and key:
-        return Credentials(username=username, key=key)
+    """Pull credentials from env / ``~/.kaggle/`` / ``KGAT_`` access tokens."""
+    config_dir = Path(os.environ.get("KAGGLE_CONFIG_DIR", "") or Path.home() / ".kaggle")
 
-    candidates = [
-        Path(os.environ.get("KAGGLE_CONFIG_DIR", "")) / "kaggle.json"
-        if os.environ.get("KAGGLE_CONFIG_DIR")
-        else None,
-        Path.home() / ".kaggle" / "kaggle.json",
-    ]
-    for path in [c for c in candidates if c is not None]:
-        if path.is_file():
-            data = json.loads(path.read_text(encoding="utf-8"))
-            if data.get("username") and data.get("key"):
-                return Credentials(username=data["username"], key=data["key"])
+    env_username = os.environ.get("KAGGLE_USERNAME") or ""
+    env_token = os.environ.get("KAGGLE_API_TOKEN") or ""
+    env_legacy = os.environ.get("KAGGLE_KEY") or ""
+
+    json_username, json_legacy = _read_kaggle_json(config_dir)
+    file_token = _read_access_token(config_dir)
+
+    username_raw = env_username or json_username or ""
+    access_token = env_token or file_token or _detect_kgat(env_legacy or json_legacy)
+    legacy_key = env_legacy or json_legacy
+
+    if access_token:
+        username = (username_raw or _introspect_username(access_token) or "").lower()
+        if not username:
+            raise KaggleError(
+                "Have a KGAT_ access token but no username. Set KAGGLE_USERNAME or "
+                "place ~/.kaggle/kaggle.json (the username field is enough)."
+            )
+        return Credentials(username=username, secret=access_token, is_access_token=True)
+
+    if username_raw and legacy_key:
+        return Credentials(
+            username=username_raw.lower(), secret=legacy_key, is_access_token=False
+        )
 
     raise KaggleError(
-        "Kaggle credentials not found. Set KAGGLE_USERNAME + KAGGLE_KEY in the "
-        "environment, or place kaggle.json under ~/.kaggle/. Get one at "
-        "https://www.kaggle.com/settings/account -> Create New Token."
+        "Kaggle credentials not found. Either:\n"
+        "  - place ~/.kaggle/access_token containing your KGAT_ token, or\n"
+        "  - place ~/.kaggle/kaggle.json (Settings -> Account -> Create New Token).\n"
+        "Env equivalents: KAGGLE_API_TOKEN, or KAGGLE_USERNAME + KAGGLE_KEY."
     )
+
+
+def _read_kaggle_json(config_dir: Path) -> tuple[str, str]:
+    path = config_dir / "kaggle.json"
+    if not path.is_file():
+        return "", ""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return "", ""
+    return str(data.get("username") or ""), str(data.get("key") or "")
+
+
+def _read_access_token(config_dir: Path) -> str:
+    for name in ("access_token", "access_token.txt"):
+        path = config_dir / name
+        if path.is_file():
+            value = path.read_text(encoding="utf-8").strip()
+            if value:
+                return value
+    return ""
+
+
+def _detect_kgat(value: str) -> str:
+    """Treat a stray KGAT_-prefixed string as an access token, not a legacy key."""
+    return value if value.startswith("KGAT_") else ""
+
+
+def _introspect_username(access_token: str) -> str:
+    try:
+        from kagglesdk import KaggleClient, KaggleEnv  # type: ignore[attr-defined]
+    except ImportError:
+        return ""
+    try:
+        client = KaggleClient(env=KaggleEnv.PROD, access_token=access_token)
+        with client:
+            from kagglesdk.security.types.security_service import IntrospectTokenRequest
+
+            request = IntrospectTokenRequest()
+            request.token = access_token
+            response = client.security_api_client.introspect_token(request)
+            return getattr(response, "username", "") or ""
+    except Exception:  # noqa: BLE001 — best-effort
+        return ""
 
 
 _PY_RUN_KAGGLE = "from kaggle.cli import main; main()"
