@@ -46,6 +46,7 @@ class InterpArgs:
     rife_version: str
     rife_gdrive_id: str
     upscale: int
+    blend_to_fps: int
     keep_audio: bool
     keep_remote: bool
     wait: bool
@@ -106,6 +107,16 @@ def _build_parser() -> argparse.ArgumentParser:
         "Adds ~10-30 min on a P100 depending on factor.",
     )
     interp.add_argument(
+        "--blend-to",
+        type=int,
+        default=0,
+        metavar="FPS",
+        help="After interpolation, average adjacent frames down to this fps "
+        "with motion blur. Useful for TikTok/social uploads where targets "
+        "above 60 fps trigger slow-motion handling. Must be < --fps. "
+        "Default: 0 (off).",
+    )
+    interp.add_argument(
         "--no-audio",
         dest="keep_audio",
         action="store_false",
@@ -153,7 +164,16 @@ def _normalize_interp(args: argparse.Namespace) -> InterpArgs:
     video = args.video.expanduser().resolve()
     if not video.is_file():
         raise SystemExit(f"input video not found: {video}")
-    suffix_parts = [f"{args.fps}fps"]
+    blend_to = int(args.blend_to or 0)
+    if blend_to and blend_to >= args.fps:
+        raise SystemExit(
+            f"--blend-to ({blend_to}) must be lower than --fps ({args.fps}) — "
+            "the whole point is averaging interpolated frames down."
+        )
+    if blend_to:
+        suffix_parts = [f"{args.fps}to{blend_to}fps"]
+    else:
+        suffix_parts = [f"{args.fps}fps"]
     if args.upscale:
         suffix_parts.append(f"{args.upscale}x")
     suffix = "-".join(suffix_parts)
@@ -169,6 +189,7 @@ def _normalize_interp(args: argparse.Namespace) -> InterpArgs:
         rife_version=args.rife_version,
         rife_gdrive_id=args.rife_gdrive_id,
         upscale=args.upscale,
+        blend_to_fps=blend_to,
         keep_audio=args.keep_audio,
         keep_remote=args.keep_remote,
         wait=args.wait,
@@ -197,6 +218,8 @@ def _cmd_interp(args: InterpArgs) -> int:
     extras = []
     if args.upscale:
         extras.append(f"upscale {args.upscale}x")
+    if args.blend_to_fps:
+        extras.append(f"blend-down {args.blend_to_fps} fps")
     if args.keep_audio:
         extras.append("audio")
     suffix = f" + {', '.join(extras)}" if extras else ""
@@ -234,6 +257,7 @@ def _cmd_interp(args: InterpArgs) -> int:
             rife_version=args.rife_version,
             upscale_factor=args.upscale,  # type: ignore[arg-type]
             keep_audio=args.keep_audio,
+            blend_to_fps=args.blend_to_fps,
         ),
     )
     (kernel_dir / "kernel-metadata.json").write_text(

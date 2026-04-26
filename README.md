@@ -58,6 +58,12 @@ rife-kaggle interp clip.mp4 --upscale 2
 # 4x upscale (~30+ min on a P100 for a 90s 432p clip)
 rife-kaggle interp clip.mp4 --upscale 4
 
+# Interpolate then average adjacent frames back down to 60 fps with motion
+# blur — for TikTok / social uploads. Source 60 fps -> 120 fps RIFE -> 60 fps
+# blended. Plays at real-time speed everywhere; motion looks smoother than
+# the raw source because each output frame contains a synthesized in-between.
+rife-kaggle interp clip.mp4 --fps 120 --blend-to 60
+
 # Skip audio re-mux
 rife-kaggle interp clip.mp4 --no-audio
 
@@ -138,8 +144,13 @@ The Kaggle notebook does:
     5. python inference_video.py --fps=<target> --multi=<auto> --video=<input>
     6. (optional) clone Real-ESRGAN and run inference_realesrgan_video.py
        with -n realesr-general-x4v3 -dn 0.5 -s <2|4>
-    7. (optional) ffmpeg re-mux source audio onto the final video
-    8. write the final mp4 to /kaggle/working/output.mp4
+    7. (optional) ffmpeg tmix average N adjacent interpolated frames per
+       output frame (where N = round(--fps / --blend-to)) and resample to
+       --blend-to fps. Drops file rate while preserving motion smoothness
+       as synthetic motion blur — keeps high-fps content out of slow-mo
+       handlers in iOS Photos / TikTok.
+    8. (optional) ffmpeg re-mux source audio onto the final video
+    9. write the final mp4 to /kaggle/working/output.mp4
 ```
 
 ## License

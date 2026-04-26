@@ -1,14 +1,16 @@
 """Build the Kaggle notebook (.ipynb) that runs RIFE (+ optional upscale) on the GPU.
 
 The notebook is generated fresh per run so we can bake in the dataset slug,
-the input filename, target fps, optional upscale factor, and audio-keep
-toggle. Output ends up at ``/kaggle/working/output.mp4`` so a single
-``kaggle kernels output`` call fetches it.
+the input filename, target fps, optional upscale factor, optional motion-blur
+blend-down, and audio-keep toggle. Output ends up at
+``/kaggle/working/output.mp4`` so a single ``kaggle kernels output`` call
+fetches it.
 
 Pipeline:
     source.mp4
         -> RIFE (frame interpolation to TARGET_FPS)
         -> Real-ESRGAN (optional upscale, --outscale 2 or 4)
+        -> ffmpeg tmix blend-down to BLEND_TO fps (optional, motion blur)
         -> ffmpeg re-mux source audio (optional)
         -> /kaggle/working/output.mp4
 """
@@ -32,13 +34,34 @@ def build_notebook(
     rife_version: str,
     upscale_factor: UpscaleFactor = 0,
     keep_audio: bool = True,
+    blend_to_fps: int = 0,
 ) -> dict[str, Any]:
     cells: list[dict[str, Any]] = [
-        _md(_header(video_filename, dataset_owner, dataset_slug, target_fps,
-                     rife_version, upscale_factor, keep_audio)),
-        _code(_resolve_input_cell(dataset_owner, dataset_slug, video_filename,
-                                   target_fps, rife_gdrive_id, rife_version,
-                                   upscale_factor, keep_audio)),
+        _md(
+            _header(
+                video_filename,
+                dataset_owner,
+                dataset_slug,
+                target_fps,
+                rife_version,
+                upscale_factor,
+                keep_audio,
+                blend_to_fps,
+            )
+        ),
+        _code(
+            _resolve_input_cell(
+                dataset_owner,
+                dataset_slug,
+                video_filename,
+                target_fps,
+                rife_gdrive_id,
+                rife_version,
+                upscale_factor,
+                keep_audio,
+                blend_to_fps,
+            )
+        ),
         _code(_install_rife_deps_cell()),
         _code(_clone_rife_cell()),
         _code(_download_rife_weights_cell()),
@@ -53,10 +76,20 @@ def build_notebook(
     else:
         cells.append(_code("# upscale skipped: upscale_factor=0\nUPSCALED = RIFE_OUT"))
 
+    if blend_to_fps and blend_to_fps < target_fps:
+        cells.append(_code(_blend_down_cell()))
+    else:
+        cells.append(_code("# blend-down skipped\nBLENDED = UPSCALED"))
+
     if keep_audio:
         cells.append(_code(_remux_audio_cell()))
     else:
-        cells.append(_code("# audio re-mux skipped: keep_audio=False\nshutil.move(str(UPSCALED), str(OUTPUT))"))
+        cells.append(
+            _code(
+                "# audio re-mux skipped: keep_audio=False\n"
+                "shutil.move(str(BLENDED), str(OUTPUT))"
+            )
+        )
 
     cells.append(_code(_finalize_cell()))
 
@@ -84,10 +117,13 @@ def _header(
     rife_version: str,
     upscale_factor: int,
     keep_audio: bool,
+    blend_to_fps: int,
 ) -> str:
     extras: list[str] = []
     if upscale_factor:
         extras.append(f"upscale {upscale_factor}x via Real-ESRGAN")
+    if blend_to_fps and blend_to_fps < target_fps:
+        extras.append(f"blend down to {blend_to_fps} fps with motion blur")
     if keep_audio:
         extras.append("audio re-muxed from source")
     suffix = f" + {', '.join(extras)}" if extras else ""
@@ -108,6 +144,7 @@ def _resolve_input_cell(
     rife_version: str,
     upscale_factor: int,
     keep_audio: bool,
+    blend_to_fps: int,
 ) -> str:
     return (
         "import os, subprocess, sys, shutil, glob, time\n"
@@ -121,10 +158,12 @@ def _resolve_input_cell(
         f"RIFE_VERSION = {json.dumps(rife_version)}\n"
         f"UPSCALE_FACTOR = {upscale_factor}\n"
         f"KEEP_AUDIO = {keep_audio}\n"
+        f"BLEND_TO_FPS = {blend_to_fps}\n"
         "WORK = Path('/kaggle/working')\n"
         "RIFE_DIR = WORK / 'RIFE'\n"
         "RIFE_OUT = WORK / 'rife-output.mp4'\n"
         "UPSCALED = WORK / 'upscaled.mp4'  # rebound below to RIFE_OUT if no upscale\n"
+        "BLENDED = WORK / 'blended.mp4'    # rebound to UPSCALED if no blend-down\n"
         "OUTPUT = WORK / 'output.mp4'\n"
         "\n"
         "# Kaggle has been migrating mount paths. Try the known shapes in order,\n"
@@ -346,15 +385,42 @@ def _run_realesrgan_cell() -> str:
     )
 
 
-def _remux_audio_cell() -> str:
+def _blend_down_cell() -> str:
+    # Average N consecutive interpolated frames into one output frame, then
+    # resample to BLEND_TO_FPS. Each output frame contains motion data from
+    # ~N/TARGET_FPS seconds of the clip — that's the synthetic motion blur
+    # that makes the result look smoother than the raw source while still
+    # playing at real-time speed. N is the target/blend ratio rounded.
     return (
-        "# Pull source audio onto the (interpolated, optionally upscaled) video.\n"
-        "# `-shortest` keeps the duration to whichever is shorter — interpolation\n"
-        "# can drift by a frame or two from the source.\n"
-        "import shlex\n"
+        "n = max(2, round(TARGET_FPS / BLEND_TO_FPS))\n"
+        "weights = ' '.join(['1'] * n)\n"
+        "filter_str = f'tmix=frames={n}:weights={weights}:scale=1,fps={BLEND_TO_FPS}'\n"
         "cmd = [\n"
         "    'ffmpeg', '-y',\n"
         "    '-i', str(UPSCALED),\n"
+        "    '-vf', filter_str,\n"
+        "    '-c:v', 'libx264', '-preset', 'medium', '-crf', '22',\n"
+        "    '-pix_fmt', 'yuv420p',\n"
+        "    '-an',\n"
+        "    str(BLENDED),\n"
+        "]\n"
+        "print('blend:', ' '.join(cmd))\n"
+        "t0 = time.time()\n"
+        "subprocess.check_call(cmd)\n"
+        "print(f'blend done in {time.time() - t0:.1f}s -> {BLENDED} ({BLENDED.stat().st_size:,} bytes)')"
+    )
+
+
+def _remux_audio_cell() -> str:
+    return (
+        "# Pull source audio onto the (interpolated, optionally upscaled,\n"
+        "# optionally blended) video. `-shortest` keeps the duration to\n"
+        "# whichever stream ends first — interpolation/blending can drift\n"
+        "# by a frame or two from the source.\n"
+        "import shlex\n"
+        "cmd = [\n"
+        "    'ffmpeg', '-y',\n"
+        "    '-i', str(BLENDED),\n"
         "    '-i', str(INPUT),\n"
         "    '-map', '0:v:0',\n"
         "    '-map', '1:a:0?',  # ? makes it optional — silent source video is OK\n"
@@ -370,7 +436,7 @@ def _remux_audio_cell() -> str:
         "    # If the source has no audio stream, retry without the audio map.\n"
         "    fallback = [\n"
         "        'ffmpeg', '-y',\n"
-        "        '-i', str(UPSCALED),\n"
+        "        '-i', str(BLENDED),\n"
         "        '-c', 'copy', str(OUTPUT),\n"
         "    ]\n"
         "    print('remux fallback (no audio):', shlex.join(fallback))\n"
