@@ -45,6 +45,8 @@ class InterpArgs:
     out: Path
     rife_version: str
     rife_gdrive_id: str
+    upscale: int
+    keep_audio: bool
     keep_remote: bool
     wait: bool
     poll_seconds: int
@@ -96,6 +98,21 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Google Drive id for the RIFE weights zip.",
     )
     interp.add_argument(
+        "--upscale",
+        type=int,
+        choices=[0, 2, 4],
+        default=0,
+        help="Real-ESRGAN upscale factor: 0 (off, default), 2, or 4. "
+        "Adds ~10-30 min on a P100 depending on factor.",
+    )
+    interp.add_argument(
+        "--no-audio",
+        dest="keep_audio",
+        action="store_false",
+        help="Skip ffmpeg re-mux of the source audio onto the output.",
+    )
+    interp.set_defaults(keep_audio=True)
+    interp.add_argument(
         "--keep-remote",
         action="store_true",
         help="Don't delete the Kaggle dataset and kernel after success.",
@@ -115,7 +132,7 @@ def _build_parser() -> argparse.ArgumentParser:
     interp.add_argument(
         "--timeout-seconds",
         type=int,
-        default=60 * 60,
+        default=2 * 60 * 60,
         help="Hard cap on how long to wait for the kernel.",
     )
     interp.set_defaults(wait=True)
@@ -136,10 +153,14 @@ def _normalize_interp(args: argparse.Namespace) -> InterpArgs:
     video = args.video.expanduser().resolve()
     if not video.is_file():
         raise SystemExit(f"input video not found: {video}")
+    suffix_parts = [f"{args.fps}fps"]
+    if args.upscale:
+        suffix_parts.append(f"{args.upscale}x")
+    suffix = "-".join(suffix_parts)
     out = (
         args.out.expanduser().resolve()
         if args.out
-        else video.with_name(f"{video.stem}-{args.fps}fps.mp4")
+        else video.with_name(f"{video.stem}-{suffix}.mp4")
     )
     return InterpArgs(
         video=video,
@@ -147,6 +168,8 @@ def _normalize_interp(args: argparse.Namespace) -> InterpArgs:
         out=out,
         rife_version=args.rife_version,
         rife_gdrive_id=args.rife_gdrive_id,
+        upscale=args.upscale,
+        keep_audio=args.keep_audio,
         keep_remote=args.keep_remote,
         wait=args.wait,
         poll_seconds=args.poll_seconds,
@@ -171,7 +194,15 @@ def _cmd_interp(args: InterpArgs) -> int:
     kernel_dir = workspace / "kernel"
     kernel_dir.mkdir(parents=True, exist_ok=True)
 
-    console.rule(f"[bold]rife-kaggle interp[/] {args.video.name} -> {args.target_fps} fps")
+    extras = []
+    if args.upscale:
+        extras.append(f"upscale {args.upscale}x")
+    if args.keep_audio:
+        extras.append("audio")
+    suffix = f" + {', '.join(extras)}" if extras else ""
+    console.rule(
+        f"[bold]rife-kaggle interp[/] {args.video.name} -> {args.target_fps} fps{suffix}"
+    )
     console.log(f"workspace: {workspace}")
     console.log(f"dataset:   {dataset_id}")
     console.log(f"kernel:    {kernel_id}")
@@ -201,6 +232,8 @@ def _cmd_interp(args: InterpArgs) -> int:
             target_fps=args.target_fps,
             rife_gdrive_id=args.rife_gdrive_id,
             rife_version=args.rife_version,
+            upscale_factor=args.upscale,  # type: ignore[arg-type]
+            keep_audio=args.keep_audio,
         ),
     )
     (kernel_dir / "kernel-metadata.json").write_text(

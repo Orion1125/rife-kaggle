@@ -1,10 +1,12 @@
 # rife-kaggle
 
-Send a video to Kaggle, get back a 120 fps RIFE-interpolated copy.
+Send a video to Kaggle, get back a 120 fps RIFE-interpolated copy — optionally
+2x or 4x upscaled and with the source audio re-muxed.
 
 The CLI uploads the video as a private Kaggle dataset, pushes a notebook that
-runs [Practical-RIFE](https://github.com/hzwer/Practical-RIFE) on Kaggle's free
-GPU, polls until it finishes, and downloads the result. No local GPU required.
+runs [Practical-RIFE](https://github.com/hzwer/Practical-RIFE) (and optionally
+[Real-ESRGAN](https://github.com/xinntao/Real-ESRGAN)) on Kaggle's free GPU,
+polls until it finishes, and downloads the result. No local GPU required.
 
 ## Why Kaggle
 
@@ -44,11 +46,20 @@ The CLI loads `.env` automatically.
 ## Use
 
 ```bash
-# Default: interpolate to 120 fps, output written next to the input
+# Default: interpolate to 120 fps, audio re-muxed from source
 rife-kaggle interp clip.mp4
 
 # Custom target framerate
 rife-kaggle interp clip.mp4 --fps 60
+
+# 2x upscale via Real-ESRGAN after interpolation (general-x4v3 model, dn=0.5)
+rife-kaggle interp clip.mp4 --upscale 2
+
+# 4x upscale (~30+ min on a P100 for a 90s 432p clip)
+rife-kaggle interp clip.mp4 --upscale 4
+
+# Skip audio re-mux
+rife-kaggle interp clip.mp4 --no-audio
 
 # Custom output path
 rife-kaggle interp clip.mp4 -o /tmp/clip-smooth.mp4
@@ -56,11 +67,22 @@ rife-kaggle interp clip.mp4 -o /tmp/clip-smooth.mp4
 # Push and exit — pull the result later
 rife-kaggle interp clip.mp4 --no-wait
 # ...takes a few minutes...
-rife-kaggle fetch orion1125/rife-interp-clip-1700000000 -o clip-120fps.mp4
+rife-kaggle fetch you/rife-interp-clip-1700000000 -o clip-120fps.mp4
 ```
 
 The CLI prints the kernel URL while it waits, so you can also follow progress
 in the Kaggle UI.
+
+### Approximate runtimes (Kaggle P100, 90s 432p source)
+
+| Pipeline                       | Time          |
+| ------------------------------ | ------------- |
+| RIFE only (30 → 120 fps)       | ~7 min        |
+| RIFE + Real-ESRGAN 2x          | ~15 min       |
+| RIFE + Real-ESRGAN 4x          | ~30-40 min    |
+
+Add ~2-3 min for the one-time torch reinstall when Kaggle hands us a P100
+instead of a T4 (the preinstalled torch only ships sm_70+ kernels).
 
 ## What gets created on Kaggle
 
@@ -105,10 +127,19 @@ rife-kaggle interp clip.mp4
         ▼ kaggle kernels output
 
 The Kaggle notebook does:
-    1. clone https://github.com/hzwer/Practical-RIFE
-    2. gdown the v4.6 weights zip into train_log/
-    3. python inference_video.py --fps=<target> --video=<input>
-    4. mv the produced mp4 to /kaggle/working/output.mp4
+    1. find the input under /kaggle/input/datasets/<owner>/<slug>/...
+    2. install RIFE deps (skipping its requirements.txt — pinned numpy
+       has no Python 3.12 wheel) and patch skvideo's removed-in-1.24
+       np.float / np.int references
+    3. detect GPU compute capability and reinstall torch 2.4.1+cu118 if
+       the assigned card (e.g. P100, sm_60) isn't covered by the image's
+       prebuilt torch
+    4. clone Practical-RIFE, gdown the weights zip into train_log/
+    5. python inference_video.py --fps=<target> --multi=<auto> --video=<input>
+    6. (optional) clone Real-ESRGAN and run inference_realesrgan_video.py
+       with -n realesr-general-x4v3 -dn 0.5 -s <2|4>
+    7. (optional) ffmpeg re-mux source audio onto the final video
+    8. write the final mp4 to /kaggle/working/output.mp4
 ```
 
 ## License
