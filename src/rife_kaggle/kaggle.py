@@ -11,6 +11,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -59,19 +60,43 @@ def resolve_credentials() -> Credentials:
     )
 
 
-def _check_cli() -> None:
-    if shutil.which("kaggle") is None:
-        raise KaggleError(
-            "`kaggle` CLI not on PATH. Install it with `pip install kaggle` and "
-            "ensure your Python scripts directory is on PATH."
+_PY_RUN_KAGGLE = "from kaggle.cli import main; main()"
+
+
+def _kaggle_invocation() -> list[str]:
+    """Return the command prefix for invoking the Kaggle CLI.
+
+    Prefers the on-PATH ``kaggle`` binary; falls back to running the package's
+    CLI entry point directly through the active Python interpreter so the
+    tool works when ``pip install --user`` placed ``kaggle.exe`` outside PATH
+    (common on Windows). The ``kaggle`` package has no ``__main__`` module,
+    so ``python -m kaggle`` does not work — we import its entry point.
+    """
+    if shutil.which("kaggle") is not None:
+        return ["kaggle"]
+
+    try:
+        subprocess.run(  # noqa: S603 — fixed args
+            [sys.executable, "-c", _PY_RUN_KAGGLE, "--version"],
+            check=True,
+            capture_output=True,
+            text=True,
         )
+    except (subprocess.CalledProcessError, FileNotFoundError) as err:
+        raise KaggleError(
+            "`kaggle` CLI not available. Install it with `pip install kaggle` "
+            "or `pip install -e .` from this repo."
+        ) from err
+    return [sys.executable, "-c", _PY_RUN_KAGGLE]
 
 
-def _run(args: list[str], creds: Credentials, capture: bool = False) -> subprocess.CompletedProcess[str]:
-    _check_cli()
+def _run(
+    args: list[str], creds: Credentials, capture: bool = False
+) -> subprocess.CompletedProcess[str]:
+    invocation = _kaggle_invocation()
     env = {**os.environ, **creds.to_env()}
     return subprocess.run(  # noqa: S603 — caller controls args
-        ["kaggle", *args],
+        [*invocation, *args],
         env=env,
         check=True,
         text=True,
