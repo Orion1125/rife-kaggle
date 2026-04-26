@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rife-kaggle"
+version = "0.1.0"
+description = "Send a video to Kaggle, get back a 120fps RIFE-interpolated copy."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Orion" }]
+dependencies = [
+  "kaggle>=1.6.17",
+  "python-dotenv>=1.0.1",
+  "rich>=13.7.0",
+]
+
+[project.scripts]
+rife-kaggle = "rife_kaggle.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+rife_kaggle = ["templates/*.json"]

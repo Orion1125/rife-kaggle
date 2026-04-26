@@ -1,0 +1,39 @@
+# env
+.env
+.env.local
+
+# kaggle credentials — never commit
+kaggle.json
+
+# python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.eggs/
+build/
+dist/
+
+# editor
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# runtime
+runs/
+*.mp4
+*.mkv
+*.mov
+*.avi
+*.webm
+!examples/sample.mp4
+
+# generated kaggle metadata
+.cache/
+.runs/
+
+# mypy / ruff
+.mypy_cache/
+.ruff_cache/
