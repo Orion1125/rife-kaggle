@@ -391,10 +391,16 @@ def _blend_down_cell() -> str:
     # ~N/TARGET_FPS seconds of the clip — that's the synthetic motion blur
     # that makes the result look smoother than the raw source while still
     # playing at real-time speed. N is the target/blend ratio rounded.
+    #
+    # We deliberately do NOT pass scale=1 to tmix. With equal-weight inputs
+    # ("1 1 1 ..."), scale=1 disables normalisation and tmix returns the
+    # SUM of N frames rather than the mean — which overflows in YUV space
+    # and ships an all-magenta output. Letting tmix default to scale=0
+    # divides by sum(weights) and gives the actual average.
     return (
         "n = max(2, round(TARGET_FPS / BLEND_TO_FPS))\n"
         "weights = ' '.join(['1'] * n)\n"
-        "filter_str = f'tmix=frames={n}:weights={weights}:scale=1,fps={BLEND_TO_FPS}'\n"
+        "filter_str = f'tmix=frames={n}:weights={weights},fps={BLEND_TO_FPS}'\n"
         "cmd = [\n"
         "    'ffmpeg', '-y',\n"
         "    '-i', str(UPSCALED),\n"
